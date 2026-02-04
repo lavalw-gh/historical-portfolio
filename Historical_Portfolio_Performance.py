@@ -240,24 +240,91 @@ def clean_daily_spikes_flat(close: pd.DataFrame, threshold: float = 0.25) -> tup
 def calculate_portfolio_value(
     close: pd.DataFrame,
     portfolio: list[tuple[str, float]],
-    initial_value: float = 1_000_000.0
-) -> pd.Series:
-    """Calculate portfolio value over time based on initial allocation."""
+    initial_value: float = 1_000_000.0,
+    rebalance_annually: bool = False
+) -> tuple[pd.Series, list[date]]:
+    """
+    Calculate portfolio value over time based on initial allocation.
+    Returns: (portfolio_values_series, list_of_rebalance_dates)
+    """
     if close.empty:
-        return pd.Series(dtype=float)
+        return pd.Series(dtype=float), []
+
+    rebalance_dates = []
+    portfolio_values = pd.Series(0.0, index=close.index)
+
+    if not rebalance_annually:
+        # Original behavior: buy and hold
+        start_prices = close.iloc[0]
+        holdings = {}
+        for ticker, weight in portfolio:
+            if ticker not in close.columns:
+                continue
+            if pd.isna(start_prices[ticker]) or start_prices[ticker] <= 0:
+                continue
+            allocation = initial_value * (weight / 100.0)
+            holdings[ticker] = allocation / start_prices[ticker]
+
+        for ticker, num_holdings in holdings.items():
+            portfolio_values += close[ticker] * num_holdings
+
+        return portfolio_values, rebalance_dates
+
+    # Annual rebalancing logic
+    current_holdings = {}
+    start_date = close.index[0]
+
+    # Initial purchase
     start_prices = close.iloc[0]
-    holdings = {}
     for ticker, weight in portfolio:
         if ticker not in close.columns:
             continue
         if pd.isna(start_prices[ticker]) or start_prices[ticker] <= 0:
             continue
         allocation = initial_value * (weight / 100.0)
-        holdings[ticker] = allocation / start_prices[ticker]
-    portfolio_values = pd.Series(0.0, index=close.index)
-    for ticker, num_holdings in holdings.items():
-        portfolio_values += close[ticker] * num_holdings
-    return portfolio_values
+        current_holdings[ticker] = allocation / start_prices[ticker]
+
+    # Track when to rebalance (anniversary dates)
+    next_rebalance_year = start_date.year + 1
+    next_rebalance_date = pd.Timestamp(date(next_rebalance_year, start_date.month, start_date.day))
+
+    for i, current_date in enumerate(close.index):
+        # Calculate current portfolio value
+        current_value = 0.0
+        for ticker, shares in current_holdings.items():
+            if ticker in close.columns:
+                price = close.loc[current_date, ticker]
+                if pd.notna(price):
+                    current_value += shares * price
+
+        portfolio_values.iloc[i] = current_value
+
+        # Check if we need to rebalance
+        if current_date >= next_rebalance_date:
+            rebalance_dates.append(pd.to_datetime(current_date).date())
+
+            # Rebalance: sell everything and buy according to target weights
+            new_holdings = {}
+            for ticker, weight in portfolio:
+                if ticker not in close.columns:
+                    continue
+                price = close.loc[current_date, ticker]
+                if pd.isna(price) or price <= 0:
+                    continue
+                target_value = current_value * (weight / 100.0)
+                new_holdings[ticker] = target_value / price
+
+            current_holdings = new_holdings
+
+            # Set next rebalance date (next anniversary)
+            next_rebalance_year += 1
+            try:
+                next_rebalance_date = pd.Timestamp(date(next_rebalance_year, start_date.month, start_date.day))
+            except ValueError:
+                # Handle leap year edge case (Feb 29)
+                next_rebalance_date = pd.Timestamp(date(next_rebalance_year, start_date.month, 28))
+
+    return portfolio_values, rebalance_dates
 
 def calculate_benchmark_value(
     close: pd.DataFrame,
@@ -400,10 +467,21 @@ def build_notes_lines(
     corrections: list[dict],
     spike_threshold_pct: int,
     portfolio_tickers_map: dict[str, list[str]],
+    rebalance_dates_map: dict[str, list[date]],
     max_dates_per_symbol: int = 12,
 ) -> list[str]:
     """Generate human-readable notes about data quality."""
     lines: list[str] = []
+
+    # Rebalancing information
+    if rebalance_dates_map:
+        lines.append("Annual rebalancing applied to all portfolios:")
+        for p_name, dates in rebalance_dates_map.items():
+            if dates:
+                dates_str = ", ".join(fmt_d(d) for d in dates[:5])
+                more = "" if len(dates) <= 5 else f" (+{len(dates) - 5} more)"
+                lines.append(f"  • {p_name}: rebalanced on {dates_str}{more}")
+
     if not missing_ranges:
         lines.append(
             f"No prices missing for the period {fmt_d(start_date)} to {fmt_d(end_date)}.")
@@ -471,9 +549,9 @@ def build_notes_lines(
 # Streamlit App
 # ----------------------------
 st.set_page_config(
-    page_title="Historical Portfolio Performance", layout="wide")
+    page_title="Historical Multi Portfolio Performance with rebalancing", layout="wide")
 
-st.title("Historical Portfolio Performance")
+st.title("Historical Multi Portfolio Performance with rebalancing")
 
 with st.sidebar:
     st.header("Portfolio Definition")
@@ -526,6 +604,13 @@ with st.sidebar:
         help="Annual interest rate for cash baseline (compounded daily) and used for Sharpe/Sortino calculations"
     )
 
+    st.header("Rebalancing")
+    enable_rebalancing = st.checkbox(
+        "Enable annual rebalancing",
+        value=False,
+        help="Rebalance all portfolios annually on the anniversary of the start date (zero transaction costs)"
+    )
+
     st.header("Inflation Adjustment")
     apply_inflation = st.checkbox(
         "Adjust for inflation",
@@ -573,7 +658,7 @@ with st.sidebar:
         "Spike threshold (%)",
         min_value=5,
         max_value=80,
-        value=25,
+        value=20,
         step=5,
     )
     show_currency_table = st.checkbox(
@@ -708,17 +793,21 @@ if show_currency_table:
 # Calculate all series
 values_df = pd.DataFrame(index=close_filled.index)
 portfolio_values_dict = {}
+rebalance_dates_map = {}
 
 # Calculate each portfolio
 for p_data in portfolios_data:
     p_name = p_data["name"]
     p_portfolio = p_data["portfolio"]
 
-    p_values = calculate_portfolio_value(
-        close_filled, p_portfolio, initial_value=1_000_000.0)
+    p_values, rebal_dates = calculate_portfolio_value(
+        close_filled, p_portfolio, initial_value=1_000_000.0, 
+        rebalance_annually=enable_rebalancing)
     if not p_values.empty:
         values_df[p_name] = p_values
         portfolio_values_dict[p_name] = p_values
+        if rebal_dates:
+            rebalance_dates_map[p_name] = rebal_dates
 
 # Benchmarks
 for bench in benchmarks:
@@ -744,6 +833,8 @@ if chart_mode == "Cumulative return (%)":
     title = f"Cumulative return — {start_date} to {end_date}"
     if apply_inflation:
         title += f" (Inflation-adjusted @ {inflation_rate}%)"
+    if enable_rebalancing:
+        title += " (with annual rebalancing)"
     ylab = "Cumulative return (%)"
     percent = True
 else:
@@ -751,6 +842,8 @@ else:
     title = f"Rebased index (start=100) — {start_date} to {end_date}"
     if apply_inflation:
         title += f" (Inflation-adjusted @ {inflation_rate}%)"
+    if enable_rebalancing:
+        title += " (with annual rebalancing)"
     ylab = "Index level"
     percent = False
 
@@ -801,6 +894,7 @@ notes = build_notes_lines(
     corrections=corrections,
     spike_threshold_pct=spike_threshold_pct,
     portfolio_tickers_map=portfolio_tickers_map,
+    rebalance_dates_map=rebalance_dates_map,
     max_dates_per_symbol=12,
 )
 for line in notes:
