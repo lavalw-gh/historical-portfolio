@@ -17,6 +17,7 @@ import yfinance as yf
 # ----------------------------
 # Parsing / settings helpers
 # ----------------------------
+
 def parse_portfolio_lines(raw: str) -> tuple[list[tuple[str, float]], str | None]:
     """
     Parse portfolio input: TICKER, WEIGHT (one per line).
@@ -49,12 +50,14 @@ def parse_portfolio_lines(raw: str) -> tuple[list[tuple[str, float]], str | None
         return [], f"Weights must sum to 100% (currently {total_weight:.2f}%)"
     return portfolio, None
 
+
 def parse_benchmark_tickers(raw: str) -> list[str]:
     """Parse comma-separated benchmark tickers."""
     if not raw:
         return []
     tickers = [t.strip().upper() for t in raw.split(",")]
     return [t for t in tickers if t]
+
 
 def resolve_date_preset(preset: str, start_custom: date, end_custom: date) -> tuple[date, date]:
     today = date.today()
@@ -74,12 +77,15 @@ def resolve_date_preset(preset: str, start_custom: date, end_custom: date) -> tu
         return today - timedelta(days=1095), today
     return start_custom, end_custom
 
+
 def fmt_d(d: date) -> str:
     return d.strftime("%d/%m/%Y")
+
 
 # ----------------------------
 # Yahoo metadata + currency
 # ----------------------------
+
 @st.cache_data(show_spinner=False, ttl=24 * 3600)
 def get_symbol_meta(symbol: str) -> dict:
     """Best-effort metadata (cached): currency + name."""
@@ -101,6 +107,7 @@ def get_symbol_meta(symbol: str) -> dict:
         meta["name"] = None
     return meta
 
+
 def currency_factor_to_major_units(yahoo_currency: str | None) -> tuple[float, str]:
     """Convert Yahoo 'GBp'/'GBX' (pence) into pounds-equivalent major units."""
     if yahoo_currency in {"GBp", "GBX"}:
@@ -111,9 +118,11 @@ def currency_factor_to_major_units(yahoo_currency: str | None) -> tuple[float, s
         return 1.0, f"No conversion applied (Yahoo currency: {yahoo_currency})"
     return 1.0, "Currency unknown (no conversion applied)"
 
+
 # ----------------------------
 # Yahoo download (Close only)
 # ----------------------------
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_yahoo_close(symbols: list[str], start: date, end: date) -> tuple[pd.DataFrame, list[dict]]:
     """Download auto-adjusted Close series for symbols."""
@@ -159,9 +168,11 @@ def fetch_yahoo_close(symbols: list[str], start: date, end: date) -> tuple[pd.Da
     close = close[symbols]
     return close, issues
 
+
 # ----------------------------
 # Missing-history handling
 # ----------------------------
+
 def backfill_leading_flat(close: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
     """Backfill leading NaN regions with first valid price."""
     close = close.sort_index().copy()
@@ -195,9 +206,11 @@ def backfill_leading_flat(close: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]
     close = close.ffill()
     return close, missing_ranges
 
+
 # ----------------------------
 # Spike cleaning
 # ----------------------------
+
 def clean_daily_spikes_flat(close: pd.DataFrame, threshold: float = 0.25) -> tuple[pd.DataFrame, list[dict]]:
     """Replace spikes exceeding threshold with previous day's price."""
     close = close.sort_index().copy()
@@ -234,9 +247,11 @@ def clean_daily_spikes_flat(close: pd.DataFrame, threshold: float = 0.25) -> tup
         close[sym] = s
     return close, corrections
 
+
 # ----------------------------
 # Portfolio & Benchmark calculations
 # ----------------------------
+
 def calculate_portfolio_value(
     close: pd.DataFrame,
     portfolio: list[tuple[str, float]],
@@ -264,10 +279,8 @@ def calculate_portfolio_value(
                 continue
             allocation = initial_value * (weight / 100.0)
             holdings[ticker] = allocation / start_prices[ticker]
-
         for ticker, num_holdings in holdings.items():
             portfolio_values += close[ticker] * num_holdings
-
         return portfolio_values, rebalance_dates
 
     # Annual rebalancing logic
@@ -296,7 +309,6 @@ def calculate_portfolio_value(
                 price = close.loc[current_date, ticker]
                 if pd.notna(price):
                     current_value += shares * price
-
         portfolio_values.iloc[i] = current_value
 
         # Check if we need to rebalance
@@ -313,7 +325,6 @@ def calculate_portfolio_value(
                     continue
                 target_value = current_value * (weight / 100.0)
                 new_holdings[ticker] = target_value / price
-
             current_holdings = new_holdings
 
             # Set next rebalance date (next anniversary)
@@ -325,6 +336,7 @@ def calculate_portfolio_value(
                 next_rebalance_date = pd.Timestamp(date(next_rebalance_year, start_date.month, 28))
 
     return portfolio_values, rebalance_dates
+
 
 def calculate_benchmark_value(
     close: pd.DataFrame,
@@ -341,6 +353,7 @@ def calculate_benchmark_value(
     num_holdings = initial_value / start_price
     return prices * num_holdings
 
+
 def calculate_cash_value(
     date_range: pd.DatetimeIndex,
     rate_pct: float,
@@ -352,6 +365,7 @@ def calculate_cash_value(
     values = initial_value * ((1 + daily_rate) ** days_from_start)
     return pd.Series(values, index=date_range)
 
+
 def apply_inflation_adjustment(
     series: pd.Series,
     inflation_pct: float
@@ -362,14 +376,17 @@ def apply_inflation_adjustment(
     inflation_factor = (1 + daily_inflation) ** days_from_start
     return series / inflation_factor
 
+
 # ----------------------------
 # Performance metrics
 # ----------------------------
+
 def calculate_cumulative_return(values: pd.Series) -> float:
     """Calculate cumulative return over the period."""
     if values.empty or values.iloc[0] == 0:
         return 0.0
     return (values.iloc[-1] / values.iloc[0]) - 1.0
+
 
 def calculate_sharpe_ratio(values: pd.Series, risk_free_rate: float) -> float:
     """Calculate annualized Sharpe ratio."""
@@ -381,6 +398,7 @@ def calculate_sharpe_ratio(values: pd.Series, risk_free_rate: float) -> float:
     excess_returns = returns - (risk_free_rate / 100.0 / 252)  # Daily risk-free rate
     sharpe = excess_returns.mean() / returns.std() * np.sqrt(252)
     return sharpe
+
 
 def calculate_sortino_ratio(values: pd.Series, risk_free_rate: float) -> float:
     """Calculate annualized Sortino ratio."""
@@ -396,6 +414,7 @@ def calculate_sortino_ratio(values: pd.Series, risk_free_rate: float) -> float:
     sortino = excess_returns.mean() / downside_returns.std() * np.sqrt(252)
     return sortino
 
+
 def calculate_max_drawdown(values: pd.Series) -> tuple[float, date | None]:
     """Calculate maximum drawdown and the date when it occurred."""
     if values.empty:
@@ -408,9 +427,11 @@ def calculate_max_drawdown(values: pd.Series) -> tuple[float, date | None]:
     max_dd_date = drawdown.idxmin()
     return max_dd, pd.to_datetime(max_dd_date).date() if max_dd_date else None
 
+
 # ----------------------------
 # Transformations for charting
 # ----------------------------
+
 def compute_rebased_index(values_df: pd.DataFrame, base_value: float = 100.0) -> pd.DataFrame:
     """Rebase all series to start at base_value."""
     out = {}
@@ -422,6 +443,7 @@ def compute_rebased_index(values_df: pd.DataFrame, base_value: float = 100.0) ->
     if not out:
         return pd.DataFrame()
     return pd.DataFrame(out).sort_index()
+
 
 def compute_cum_return(values_df: pd.DataFrame) -> pd.DataFrame:
     """Compute cumulative return for all series."""
@@ -435,9 +457,11 @@ def compute_cum_return(values_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     return pd.DataFrame(out).sort_index()
 
+
 # ----------------------------
 # Plot + export
 # ----------------------------
+
 def plot_lines(df: pd.DataFrame, title: str, y_label: str, percent: bool) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(11, 5.5))
     for col in df.columns:
@@ -450,6 +474,7 @@ def plot_lines(df: pd.DataFrame, title: str, y_label: str, percent: bool) -> plt
     fig.autofmt_xdate()
     return fig
 
+
 def fig_to_png_bytes(fig: plt.Figure) -> bytes:
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=170, bbox_inches="tight")
@@ -457,9 +482,11 @@ def fig_to_png_bytes(fig: plt.Figure) -> bytes:
     buf.seek(0)
     return buf.getvalue()
 
+
 # ----------------------------
 # Notes generation
 # ----------------------------
+
 def build_notes_lines(
     start_date: date,
     end_date: date,
@@ -480,7 +507,7 @@ def build_notes_lines(
             if dates:
                 dates_str = ", ".join(fmt_d(d) for d in dates[:5])
                 more = "" if len(dates) <= 5 else f" (+{len(dates) - 5} more)"
-                lines.append(f"  • {p_name}: rebalanced on {dates_str}{more}")
+                lines.append(f" • {p_name}: rebalanced on {dates_str}{more}")
 
     if not missing_ranges:
         lines.append(
@@ -489,6 +516,7 @@ def build_notes_lines(
         any_leading = any(
             m.get("type") == "leadingnan" for m in missing_ranges)
         any_nodata = any(m.get("type") == "nodata" for m in missing_ranges)
+
         if any_leading:
             for m in missing_ranges:
                 if m.get("type") != "leadingnan":
@@ -497,15 +525,14 @@ def build_notes_lines(
                 start = pd.to_datetime(m["start"]).date()
                 end = pd.to_datetime(m["end"]).date()
                 used = pd.to_datetime(m["used_price_from"]).date()
-
                 # Find which portfolios use this ticker
                 affected_portfolios = [pname for pname, tickers in portfolio_tickers_map.items() if s in tickers]
                 portfolio_str = f" (affects {', '.join(affected_portfolios)})" if affected_portfolios else ""
-
                 lines.append(
                     f"{s} missing prices from {fmt_d(start)} to {fmt_d(end)}; "
                     f"backfilled using the price from {fmt_d(used)} (assumed zero growth){portfolio_str}."
                 )
+
         if any_nodata:
             for m in missing_ranges:
                 if m.get("type") != "nodata":
@@ -513,12 +540,11 @@ def build_notes_lines(
                 s = m["symbol"]
                 start = pd.to_datetime(m["start"]).date()
                 end = pd.to_datetime(m["end"]).date()
-
                 affected_portfolios = [pname for pname, tickers in portfolio_tickers_map.items() if s in tickers]
                 portfolio_str = f" (affects {', '.join(affected_portfolios)})" if affected_portfolios else ""
-
                 lines.append(
                     f"{s} has no usable Yahoo price history between {fmt_d(start)} and {fmt_d(end)}{portfolio_str}.")
+
     if not corrections:
         lines.append(
             f"No spike flattening was applied (threshold {spike_threshold_pct}% daily move).")
@@ -538,16 +564,17 @@ def build_notes_lines(
             dates_str = ", ".join(dt.strftime("%d/%m/%Y") for dt in shown)
             more = "" if len(
                 dts) <= max_dates_per_symbol else f" (+{len(dts) - max_dates_per_symbol} more)"
-
             affected_portfolios = [pname for pname, tickers in portfolio_tickers_map.items() if sym in tickers]
             portfolio_str = f" (affects {', '.join(affected_portfolios)})" if affected_portfolios else ""
-
             lines.append(f"{sym} flattened on: {dates_str}{more}{portfolio_str}.")
+
     return lines
+
 
 # ----------------------------
 # Streamlit App
 # ----------------------------
+
 st.set_page_config(
     page_title="Historical Multi Portfolio Performance with rebalancing", layout="wide")
 
@@ -661,6 +688,7 @@ with st.sidebar:
         value=20,
         step=5,
     )
+
     show_currency_table = st.checkbox(
         "Show currency / pence-pound handling", value=False)
 
@@ -799,9 +827,8 @@ rebalance_dates_map = {}
 for p_data in portfolios_data:
     p_name = p_data["name"]
     p_portfolio = p_data["portfolio"]
-
     p_values, rebal_dates = calculate_portfolio_value(
-        close_filled, p_portfolio, initial_value=1_000_000.0, 
+        close_filled, p_portfolio, initial_value=1_000_000.0,
         rebalance_annually=enable_rebalancing)
     if not p_values.empty:
         values_df[p_name] = p_values
@@ -854,7 +881,6 @@ if plot_df.empty:
 # Plot
 fig = plot_lines(plot_df, title=title, y_label=ylab, percent=percent)
 st.pyplot(fig, use_container_width=True)
-
 png_bytes = fig_to_png_bytes(fig)
 st.download_button(
     "Download chart as PNG",
@@ -864,17 +890,23 @@ st.download_button(
 )
 
 # Calculate and display performance metrics
+# FIX 1: Use values_df (which includes inflation adjustment) instead of portfolio_values_dict
+# FIX 2: Include benchmarks and cash in the metrics table
 st.subheader("Portfolio Performance Metrics")
 
 metrics_data = []
-for p_name, p_values in portfolio_values_dict.items():
-    cum_ret = calculate_cumulative_return(p_values)
-    sharpe = calculate_sharpe_ratio(p_values, cash_rate)
-    sortino = calculate_sortino_ratio(p_values, cash_rate)
-    max_dd, max_dd_date = calculate_max_drawdown(p_values)
+
+# Calculate metrics for all series in values_df (portfolios, benchmarks, and cash)
+for col_name in values_df.columns:
+    series_values = values_df[col_name]
+
+    cum_ret = calculate_cumulative_return(series_values)
+    sharpe = calculate_sharpe_ratio(series_values, cash_rate)
+    sortino = calculate_sortino_ratio(series_values, cash_rate)
+    max_dd, max_dd_date = calculate_max_drawdown(series_values)
 
     metrics_data.append({
-        "Portfolio": p_name,
+        "Portfolio/Benchmark": col_name,
         "Cumulative Return": f"{cum_ret * 100:.2f}%",
         "Sharpe Ratio": f"{sharpe:.2f}",
         "Sortino Ratio": f"{sortino:.2f}",
