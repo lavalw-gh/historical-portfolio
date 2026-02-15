@@ -588,8 +588,8 @@ with st.sidebar:
     st.header("Portfolio Definition")
 
     # Portfolio 1
-    st.subheader("Classic 60/40")
-    portfolio1_name = st.text_input("Portfolio 1 Name", value="", placeholder="Portfolio 1", key="p1_name")
+    st.subheader("Portfolio 1")
+    portfolio1_name = st.text_input("Portfolio 1 Name", value="", placeholder="Classic 60/40", key="p1_name")
     raw_portfolio1 = st.text_area(
         "Tickers + Weight",
         value="VUSA.L, 60\nIGLS.L, 15\nIGLT.L, 25",
