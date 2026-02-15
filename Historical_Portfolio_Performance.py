@@ -588,11 +588,11 @@ with st.sidebar:
     st.header("Portfolio Definition")
 
     # Portfolio 1
-    st.subheader("Portfolio 1")
+    st.subheader("Classic 60/40")
     portfolio1_name = st.text_input("Portfolio 1 Name", value="", placeholder="Portfolio 1", key="p1_name")
     raw_portfolio1 = st.text_area(
         "Tickers + Weight",
-        value="VHYL.L, 50\nVUAG.L, 30\nXDEV.L, 20",
+        value="VUSA.L, 60\nIGLS.L, 15\nIGLT.L, 25",
         height=120,
         help="Enter tickers with weights (one per line). Format: TICKER, WEIGHT. Weights must sum to 100%.",
         key="p1_tickers"
