@@ -600,10 +600,10 @@ with st.sidebar:
 
     # Portfolio 2
     st.subheader("Portfolio 2")
-    portfolio2_name = st.text_input("Portfolio 2 Name", value="", placeholder="Portfolio 2", key="p2_name")
+    portfolio2_name = st.text_input("Portfolio 2 Name", value="", placeholder="NG - Moderate", key="p2_name")
     raw_portfolio2 = st.text_area(
         "Tickers + Weight",
-        value="",
+        value="VHYL.L, 50\nSWDA.L, 25\nIUMF.L, 15\nEQQQ.L, 10",
         height=120,
         help="Enter tickers with weights (one per line). Format: TICKER, WEIGHT. Weights must sum to 100%.",
         key="p2_tickers"
