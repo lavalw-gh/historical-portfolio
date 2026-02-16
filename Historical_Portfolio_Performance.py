@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 from datetime import date, timedelta
 from io import BytesIO
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -19,30 +21,40 @@ def parse_portfolio_lines(raw: str) -> tuple[list[tuple[str, float]], str | None
     Returns: (list of (ticker, weight), error_message)
     """
     lines = [ln.strip() for ln in (raw or "").splitlines()]
-    portfolio = []
+    portfolio: list[tuple[str, float]] = []
     seen_tickers = set()
+
     for ln in lines:
         if not ln:
             continue
+
         parts = [p.strip() for p in ln.split(",")]
         if len(parts) != 2:
             return [], f"Invalid format: '{ln}'. Expected: TICKER, WEIGHT"
+
         ticker = parts[0].upper()
+
         try:
             weight = float(parts[1])
         except ValueError:
             return [], f"Invalid weight for {ticker}: '{parts[1]}' is not a number"
+
         if weight < 0:
             return [], f"Weight for {ticker} must be non-negative (got {weight})"
+
         if ticker in seen_tickers:
             return [], f"Duplicate ticker: {ticker}"
+
         seen_tickers.add(ticker)
         portfolio.append((ticker, weight))
+
     if not portfolio:
         return [], "Portfolio is empty"
+
     total_weight = sum(w for _, w in portfolio)
     if abs(total_weight - 100.0) > 0.01:
         return [], f"Weights must sum to 100% (currently {total_weight:.2f}%)"
+
     return portfolio, None
 
 
@@ -56,6 +68,7 @@ def parse_benchmark_tickers(raw: str) -> list[str]:
 
 def resolve_date_preset(preset: str, start_custom: date, end_custom: date) -> tuple[date, date]:
     today = date.today()
+
     if preset == "Custom":
         return start_custom, end_custom
     if preset == "Last 3 months":
@@ -77,36 +90,41 @@ def resolve_date_preset(preset: str, start_custom: date, end_custom: date) -> tu
     if preset == "Max":
         # Will be handled separately - return placeholder
         return date(1900, 1, 1), today
+
     return start_custom, end_custom
 
 
 def fmt_d(d: date) -> str:
     return d.strftime("%d/%m/%Y")
 
+
 # ----------------------------
 # Yahoo metadata + currency
 # ----------------------------
-
 
 @st.cache_data(show_spinner=False, ttl=24 * 3600)
 def get_symbol_meta(symbol: str) -> dict:
     """Best-effort metadata (cached): currency + name."""
     t = yf.Ticker(symbol)
     meta = {"symbol": symbol, "currency": None, "name": None}
+
     try:
         meta["currency"] = getattr(t.fastinfo, "currency", None)
     except Exception:
         meta["currency"] = None
+
     if not meta["currency"]:
         try:
             meta["currency"] = (t.info or {}).get("currency", None)
         except Exception:
             meta["currency"] = None
+
     try:
         info = t.info or {}
         meta["name"] = info.get("longName") or info.get("shortName")
     except Exception:
         meta["name"] = None
+
     return meta
 
 
@@ -120,10 +138,10 @@ def currency_factor_to_major_units(yahoo_currency: str | None) -> tuple[float, s
         return 1.0, f"No conversion applied (Yahoo currency: {yahoo_currency})"
     return 1.0, "Currency unknown (no conversion applied)"
 
+
 # ----------------------------
 # Yahoo download (Close only)
 # ----------------------------
-
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_yahoo_close(symbols: list[str], start: date, end: date) -> tuple[pd.DataFrame, list[dict]]:
@@ -132,6 +150,7 @@ def fetch_yahoo_close(symbols: list[str], start: date, end: date) -> tuple[pd.Da
         return pd.DataFrame(), [{"symbol": "", "problem": "No symbols provided"}]
 
     end_plus = end + timedelta(days=1)
+
     data = yf.download(
         symbols,
         start=start,
@@ -142,15 +161,14 @@ def fetch_yahoo_close(symbols: list[str], start: date, end: date) -> tuple[pd.Da
     )
 
     issues: list[dict] = []
+
     if data is None or getattr(data, "empty", True):
-        issues.append({"symbol": ",".join(symbols),
-                      "problem": "No data returned for any symbol"})
+        issues.append({"symbol": ",".join(symbols), "problem": "No data returned for any symbol"})
         return pd.DataFrame(), issues
 
     if isinstance(data.columns, pd.MultiIndex):
         if "Close" not in data.columns.get_level_values(0):
-            issues.append({"symbol": ",".join(
-                symbols), "problem": "Expected Close in yfinance output but not found"})
+            issues.append({"symbol": ",".join(symbols), "problem": "Expected Close in yfinance output but not found"})
             return pd.DataFrame(), issues
         close = data["Close"].copy()
     else:
@@ -161,24 +179,22 @@ def fetch_yahoo_close(symbols: list[str], start: date, end: date) -> tuple[pd.Da
             close = data["Adj Close"].to_frame()
             close.columns = [symbols[0]]
         else:
-            issues.append(
-                {"symbol": symbols[0], "problem": "Neither Close nor Adj Close found in yfinance output"})
+            issues.append({"symbol": symbols[0], "problem": "Neither Close nor Adj Close found in yfinance output"})
             return pd.DataFrame(), issues
 
     for s in symbols:
         if s not in close.columns:
             close[s] = np.nan
-            issues.append(
-                {"symbol": s, "problem": "Symbol missing from Yahoo download (column added as all-NaN)"})
+            issues.append({"symbol": s, "problem": "Symbol missing from Yahoo download (column added as all-NaN)"})
 
     close = close.sort_index()
     close = close[symbols]
     return close, issues
 
+
 # ----------------------------
 # Max date range determination
 # ----------------------------
-
 
 def find_max_common_start_date(symbols: list[str]) -> tuple[date | None, str | None]:
     """
@@ -223,7 +239,7 @@ def find_max_common_start_date(symbols: list[str]) -> tuple[date | None, str | N
                 return None, None
 
         # Find first valid date for each symbol
-        first_dates = {}
+        first_dates: dict[str, date] = {}
         for sym in symbols:
             if sym in close.columns:
                 first_valid = close[sym].first_valid_index()
@@ -236,16 +252,15 @@ def find_max_common_start_date(symbols: list[str]) -> tuple[date | None, str | N
         # The max (latest) first date is our common start
         limiting_symbol = max(first_dates, key=first_dates.get)
         common_start = first_dates[limiting_symbol]
-
         return common_start, limiting_symbol
 
     except Exception:
         return None, None
 
+
 # ----------------------------
 # Missing-history handling
 # ----------------------------
-
 
 def backfill_leading_flat(close: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
     """Backfill leading NaN regions with first valid price."""
@@ -260,36 +275,34 @@ def backfill_leading_flat(close: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]
 
     for s in close.columns:
         ser = close[s]
+
         if ser.isna().all():
-            missing_ranges.append({
-                "symbol": s,
-                "type": "nodata",
-                "start": first_idx,
-                "end": last_idx,
-            })
+            missing_ranges.append(
+                {"symbol": s, "type": "nodata", "start": first_idx, "end": last_idx}
+            )
             continue
 
         first_valid = ser.first_valid_index()
         if first_valid is not None and first_valid > first_idx:
-            missing_ranges.append({
-                "symbol": s,
-                "type": "leadingnan",
-                "start": first_idx,
-                "end": first_valid - pd.Timedelta(days=1),
-                "used_price_from": first_valid,
-            })
+            missing_ranges.append(
+                {
+                    "symbol": s,
+                    "type": "leadingnan",
+                    "start": first_idx,
+                    "end": first_valid - pd.Timedelta(days=1),
+                    "used_price_from": first_valid,
+                }
+            )
             fillvalue = close.at[first_valid, s]
-            close.loc[(close.index >= first_idx) & (
-                close.index < first_valid), s] = fillvalue
+            close.loc[(close.index >= first_idx) & (close.index < first_valid), s] = fillvalue
 
     close = close.ffill()
-
     return close, missing_ranges
+
 
 # ----------------------------
 # Spike cleaning
 # ----------------------------
-
 
 def clean_daily_spikes_flat(close: pd.DataFrame, threshold: float = 0.25) -> tuple[pd.DataFrame, list[dict]]:
     """Replace spikes exceeding threshold with previous day's price."""
@@ -302,6 +315,7 @@ def clean_daily_spikes_flat(close: pd.DataFrame, threshold: float = 0.25) -> tup
     for sym in close.columns:
         s = close[sym]
         prev_val = None
+
         for ts in s.index:
             val = s.at[ts]
             if pd.isna(val):
@@ -320,13 +334,9 @@ def clean_daily_spikes_flat(close: pd.DataFrame, threshold: float = 0.25) -> tup
                 old = float(val)
                 new = float(prev_val)
                 s.at[ts] = new
-                corrections.append({
-                    "symbol": sym,
-                    "date": ts,
-                    "pct_move": pct,
-                    "old_price": old,
-                    "new_price": new,
-                })
+                corrections.append(
+                    {"symbol": sym, "date": ts, "pct_move": pct, "old_price": old, "new_price": new}
+                )
             else:
                 prev_val = float(val)
 
@@ -334,16 +344,16 @@ def clean_daily_spikes_flat(close: pd.DataFrame, threshold: float = 0.25) -> tup
 
     return close, corrections
 
+
 # ----------------------------
 # Portfolio & Benchmark calculations
 # ----------------------------
-
 
 def calculate_portfolio_value(
     close: pd.DataFrame,
     portfolio: list[tuple[str, float]],
     initial_value: float = 1_000_000.0,
-    rebalance_annually: bool = False
+    rebalance_annually: bool = False,
 ) -> tuple[pd.Series, list[date]]:
     """
     Calculate portfolio value over time based on initial allocation.
@@ -352,18 +362,20 @@ def calculate_portfolio_value(
     if close.empty:
         return pd.Series(dtype=float), []
 
-    rebalance_dates = []
+    rebalance_dates: list[date] = []
     portfolio_values = pd.Series(0.0, index=close.index)
 
     if not rebalance_annually:
         # Original behavior: buy and hold
         start_prices = close.iloc[0]
-        holdings = {}
+        holdings: dict[str, float] = {}
+
         for ticker, weight in portfolio:
             if ticker not in close.columns:
                 continue
             if pd.isna(start_prices[ticker]) or start_prices[ticker] <= 0:
                 continue
+
             allocation = initial_value * (weight / 100.0)
             holdings[ticker] = allocation / start_prices[ticker]
 
@@ -373,7 +385,7 @@ def calculate_portfolio_value(
         return portfolio_values, rebalance_dates
 
     # Annual rebalancing logic
-    current_holdings = {}
+    current_holdings: dict[str, float] = {}
     start_date = close.index[0]
 
     # Initial purchase
@@ -388,8 +400,7 @@ def calculate_portfolio_value(
 
     # Track when to rebalance (anniversary dates)
     next_rebalance_year = start_date.year + 1
-    next_rebalance_date = pd.Timestamp(
-        date(next_rebalance_year, start_date.month, start_date.day))
+    next_rebalance_date = pd.Timestamp(date(next_rebalance_year, start_date.month, start_date.day))
 
     for i, current_date in enumerate(close.index):
         # Calculate current portfolio value
@@ -407,7 +418,7 @@ def calculate_portfolio_value(
             rebalance_dates.append(pd.to_datetime(current_date).date())
 
             # Rebalance: sell everything and buy according to target weights
-            new_holdings = {}
+            new_holdings: dict[str, float] = {}
             for ticker, weight in portfolio:
                 if ticker not in close.columns:
                     continue
@@ -422,21 +433,15 @@ def calculate_portfolio_value(
             # Set next rebalance date (next anniversary)
             next_rebalance_year += 1
             try:
-                next_rebalance_date = pd.Timestamp(
-                    date(next_rebalance_year, start_date.month, start_date.day))
+                next_rebalance_date = pd.Timestamp(date(next_rebalance_year, start_date.month, start_date.day))
             except ValueError:
                 # Handle leap year edge case (Feb 29)
-                next_rebalance_date = pd.Timestamp(
-                    date(next_rebalance_year, start_date.month, 28))
+                next_rebalance_date = pd.Timestamp(date(next_rebalance_year, start_date.month, 28))
 
     return portfolio_values, rebalance_dates
 
 
-def calculate_benchmark_value(
-    close: pd.DataFrame,
-    ticker: str,
-    initial_value: float = 1_000_000.0
-) -> pd.Series:
+def calculate_benchmark_value(close: pd.DataFrame, ticker: str, initial_value: float = 1_000_000.0) -> pd.Series:
     """Calculate benchmark value over time."""
     if ticker not in close.columns:
         return pd.Series(dtype=float)
@@ -450,11 +455,7 @@ def calculate_benchmark_value(
     return prices * num_holdings
 
 
-def calculate_cash_value(
-    date_range: pd.DatetimeIndex,
-    rate_pct: float,
-    initial_value: float = 1_000_000.0
-) -> pd.Series:
+def calculate_cash_value(date_range: pd.DatetimeIndex, rate_pct: float, initial_value: float = 1_000_000.0) -> pd.Series:
     """Calculate cash value with daily compounding."""
     daily_rate = rate_pct / 100.0 / 365.0
     days_from_start = (date_range - date_range[0]).days
@@ -462,26 +463,53 @@ def calculate_cash_value(
     return pd.Series(values, index=date_range)
 
 
-def apply_inflation_adjustment(
-    series: pd.Series,
-    inflation_pct: float
-) -> pd.Series:
+def apply_inflation_adjustment(series: pd.Series, inflation_pct: float) -> pd.Series:
     """Apply inflation adjustment using real return formula."""
     daily_inflation = inflation_pct / 100.0 / 365.0
     days_from_start = (series.index - series.index[0]).days
     inflation_factor = (1 + daily_inflation) ** days_from_start
     return series / inflation_factor
 
+
 # ----------------------------
 # Performance metrics
 # ----------------------------
-
 
 def calculate_cumulative_return(values: pd.Series) -> float:
     """Calculate cumulative return over the period."""
     if values.empty or values.iloc[0] == 0:
         return 0.0
     return (values.iloc[-1] / values.iloc[0]) - 1.0
+
+
+def calculate_annualized_return(values: pd.Series) -> float:
+    """Calculate annualized return over the period using calendar time."""
+    if values.empty:
+        return 0.0
+
+    s = values.dropna()
+    if s.empty or s.iloc[0] <= 0:
+        return 0.0
+
+    start_val = float(s.iloc[0])
+    end_val = float(s.iloc[-1])
+
+    if start_val <= 0:
+        return 0.0
+
+    start_dt = pd.to_datetime(s.index[0])
+    end_dt = pd.to_datetime(s.index[-1])
+    days = (end_dt - start_dt).days
+
+    if days <= 0:
+        # If only one data point / same day, fall back to cumulative
+        return (end_val / start_val) - 1.0
+
+    years = days / 365.25
+    if years <= 0:
+        return (end_val / start_val) - 1.0
+
+    return (end_val / start_val) ** (1.0 / years) - 1.0
 
 
 def calculate_sharpe_ratio(values: pd.Series, risk_free_rate: float) -> float:
@@ -493,8 +521,7 @@ def calculate_sharpe_ratio(values: pd.Series, risk_free_rate: float) -> float:
     if returns.empty or returns.std() == 0:
         return 0.0
 
-    excess_returns = returns - \
-        (risk_free_rate / 100.0 / 252)  # Daily risk-free rate
+    excess_returns = returns - (risk_free_rate / 100.0 / 252)  # Daily risk-free rate
     sharpe = excess_returns.mean() / returns.std() * np.sqrt(252)
     return sharpe
 
@@ -533,46 +560,54 @@ def calculate_max_drawdown(values: pd.Series) -> tuple[float, date | None]:
     max_dd_date = drawdown.idxmin()
     return max_dd, pd.to_datetime(max_dd_date).date() if max_dd_date else None
 
+
 # ----------------------------
 # Transformations for charting
 # ----------------------------
 
-
 def compute_rebased_index(values_df: pd.DataFrame, base_value: float = 100.0) -> pd.DataFrame:
     """Rebase all series to start at base_value."""
-    out = {}
+    out: dict[str, pd.Series] = {}
+
     for c in values_df.columns:
         s = values_df[c].dropna()
         if s.empty or s.iloc[0] == 0:
             continue
         out[c] = (s / s.iloc[0]) * base_value
+
     if not out:
         return pd.DataFrame()
+
     return pd.DataFrame(out).sort_index()
 
 
 def compute_cum_return(values_df: pd.DataFrame) -> pd.DataFrame:
     """Compute cumulative return for all series."""
-    out = {}
+    out: dict[str, pd.Series] = {}
+
     for c in values_df.columns:
         s = values_df[c].dropna()
         if s.empty or s.iloc[0] == 0:
             continue
         out[c] = (s / s.iloc[0]) - 1.0
+
     if not out:
         return pd.DataFrame()
+
     return pd.DataFrame(out).sort_index()
+
 
 # ----------------------------
 # Plot + export
 # ----------------------------
 
-
 def plot_lines(df: pd.DataFrame, title: str, y_label: str, percent: bool) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(11, 5.5))
+
     for col in df.columns:
         y = df[col] * 100.0 if percent else df[col]
         ax.plot(df.index, y, label=col, linewidth=1.6)
+
     ax.set_title(title)
     ax.set_ylabel(y_label)
     ax.grid(True, alpha=0.25)
@@ -588,10 +623,10 @@ def fig_to_png_bytes(fig: plt.Figure) -> bytes:
     buf.seek(0)
     return buf.getvalue()
 
+
 # ----------------------------
 # Notes generation
 # ----------------------------
-
 
 def build_notes_lines(
     start_date: date,
@@ -624,11 +659,9 @@ def build_notes_lines(
                 lines.append(f" • {p_name}: rebalanced on {dates_str}{more}")
 
     if not missing_ranges:
-        lines.append(
-            f"No prices missing for the period {fmt_d(start_date)} to {fmt_d(end_date)}.")
+        lines.append(f"No prices missing for the period {fmt_d(start_date)} to {fmt_d(end_date)}.")
     else:
-        any_leading = any(
-            m.get("type") == "leadingnan" for m in missing_ranges)
+        any_leading = any(m.get("type") == "leadingnan" for m in missing_ranges)
         any_nodata = any(m.get("type") == "nodata" for m in missing_ranges)
 
         if any_leading:
@@ -639,10 +672,10 @@ def build_notes_lines(
                 start = pd.to_datetime(m["start"]).date()
                 end = pd.to_datetime(m["end"]).date()
                 used = pd.to_datetime(m["used_price_from"]).date()
-                # Find which portfolios use this ticker
-                affected_portfolios = [
-                    pname for pname, tickers in portfolio_tickers_map.items() if s in tickers]
+
+                affected_portfolios = [pname for pname, tickers in portfolio_tickers_map.items() if s in tickers]
                 portfolio_str = f" (affects {', '.join(affected_portfolios)})" if affected_portfolios else ""
+
                 lines.append(
                     f"{s} missing prices from {fmt_d(start)} to {fmt_d(end)}; "
                     f"backfilled using the price from {fmt_d(used)} (assumed zero growth){portfolio_str}."
@@ -655,15 +688,16 @@ def build_notes_lines(
                 s = m["symbol"]
                 start = pd.to_datetime(m["start"]).date()
                 end = pd.to_datetime(m["end"]).date()
-                affected_portfolios = [
-                    pname for pname, tickers in portfolio_tickers_map.items() if s in tickers]
+
+                affected_portfolios = [pname for pname, tickers in portfolio_tickers_map.items() if s in tickers]
                 portfolio_str = f" (affects {', '.join(affected_portfolios)})" if affected_portfolios else ""
+
                 lines.append(
-                    f"{s} has no usable Yahoo price history between {fmt_d(start)} and {fmt_d(end)}{portfolio_str}.")
+                    f"{s} has no usable Yahoo price history between {fmt_d(start)} and {fmt_d(end)}{portfolio_str}."
+                )
 
     if not corrections:
-        lines.append(
-            f"No spike flattening was applied (threshold {spike_threshold_pct}% daily move).")
+        lines.append(f"No spike flattening was applied (threshold {spike_threshold_pct}% daily move).")
     else:
         lines.append(
             f"Possible data-quality spikes were flattened when the 1-day move exceeded {spike_threshold_pct}% "
@@ -680,23 +714,21 @@ def build_notes_lines(
             dts = sorted(set(by_sym[sym]))
             shown = dts[:max_dates_per_symbol]
             dates_str = ", ".join(dt.strftime("%d/%m/%Y") for dt in shown)
-            more = "" if len(
-                dts) <= max_dates_per_symbol else f" (+{len(dts) - max_dates_per_symbol} more)"
-            affected_portfolios = [
-                pname for pname, tickers in portfolio_tickers_map.items() if sym in tickers]
+            more = "" if len(dts) <= max_dates_per_symbol else f" (+{len(dts) - max_dates_per_symbol} more)"
+
+            affected_portfolios = [pname for pname, tickers in portfolio_tickers_map.items() if sym in tickers]
             portfolio_str = f" (affects {', '.join(affected_portfolios)})" if affected_portfolios else ""
-            lines.append(
-                f"{sym} flattened on: {dates_str}{more}{portfolio_str}.")
+
+            lines.append(f"{sym} flattened on: {dates_str}{more}{portfolio_str}.")
 
     return lines
+
 
 # ----------------------------
 # Streamlit App
 # ----------------------------
 
-
-st.set_page_config(
-    page_title="Historical Multi Portfolio Performance with rebalancing", layout="wide")
+st.set_page_config(page_title="Historical Multi Portfolio Performance with rebalancing", layout="wide")
 st.title("Historical Multi Portfolio Performance with rebalancing")
 
 with st.sidebar:
@@ -704,45 +736,42 @@ with st.sidebar:
 
     # Portfolio 1
     st.subheader("Portfolio 1")
-    portfolio1_name = st.text_input(
-        "Portfolio 1 Name", value="", placeholder="Classic 60/40", key="p1_name")
+    portfolio1_name = st.text_input("Portfolio 1 Name", value="", placeholder="Classic 60/40", key="p1_name")
     raw_portfolio1 = st.text_area(
         "Tickers + Weight",
         value="VUSA.L, 60\nIGLS.L, 15\nIGLT.L, 25",
         height=120,
         help="Enter tickers with weights (one per line). Format: TICKER, WEIGHT. Weights must sum to 100%.",
-        key="p1_tickers"
+        key="p1_tickers",
     )
 
     # Portfolio 2
     st.subheader("Portfolio 2")
-    portfolio2_name = st.text_input(
-        "Portfolio 2 Name", value="", placeholder="NG - Moderate", key="p2_name")
+    portfolio2_name = st.text_input("Portfolio 2 Name", value="", placeholder="NG - Moderate", key="p2_name")
     raw_portfolio2 = st.text_area(
         "Tickers + Weight",
         value="VHYL.L, 50\nSWDA.L, 25\nIUMF.L, 15\nEQQQ.L, 10",
         height=120,
         help="Enter tickers with weights (one per line). Format: TICKER, WEIGHT. Weights must sum to 100%.",
-        key="p2_tickers"
+        key="p2_tickers",
     )
 
     # Portfolio 3
     st.subheader("Portfolio 3")
-    portfolio3_name = st.text_input(
-        "Portfolio 3 Name", value="", placeholder="Portfolio 3", key="p3_name")
+    portfolio3_name = st.text_input("Portfolio 3 Name", value="", placeholder="Portfolio 3", key="p3_name")
     raw_portfolio3 = st.text_area(
         "Tickers + Weight",
         value="",
         height=120,
         help="Enter tickers with weights (one per line). Format: TICKER, WEIGHT. Weights must sum to 100%.",
-        key="p3_tickers"
+        key="p3_tickers",
     )
 
     st.header("Benchmark & Baselines")
     benchmark_input = st.text_input(
         "Benchmark tickers (comma-separated)",
         value="^GSPC",
-        help="Enter one or more benchmark tickers separated by commas. Each starts with £1m."
+        help="Enter one or more benchmark tickers separated by commas. Each starts with £1m.",
     )
 
     cash_rate = st.number_input(
@@ -751,21 +780,21 @@ with st.sidebar:
         max_value=20.0,
         value=4.0,
         step=0.1,
-        help="Annual interest rate for cash baseline (compounded daily) and used for Sharpe/Sortino calculations"
+        help="Annual interest rate for cash baseline (compounded daily) and used for Sharpe/Sortino calculations",
     )
 
     st.header("Rebalancing")
     enable_rebalancing = st.checkbox(
         "Enable annual rebalancing",
         value=False,
-        help="Rebalance all portfolios annually on the anniversary of the start date (zero transaction costs)"
+        help="Rebalance all portfolios annually on the anniversary of the start date (zero transaction costs)",
     )
 
     st.header("Inflation Adjustment")
     apply_inflation = st.checkbox(
         "Adjust for inflation",
         value=False,
-        help="Apply real return calculation: (1 + r_real) = (1 + r_nominal) / (1 + inflation)"
+        help="Apply real return calculation: (1 + r_real) = (1 + r_nominal) / (1 + inflation)",
     )
 
     inflation_rate = st.number_input(
@@ -775,14 +804,13 @@ with st.sidebar:
         value=4.0,
         step=0.1,
         disabled=not apply_inflation,
-        help="Annual inflation rate applied daily"
+        help="Annual inflation rate applied daily",
     )
 
     st.header("Date Range")
     date_preset = st.selectbox(
         "Date range",
-        ["Custom", "Last 3 months", "Last 6 months", "YTD",
-         "Last 12 months", "Last 24 months", "Last 36 months", "Last 5 yrs", "Last 10 yrs", "Max"],
+        ["Custom", "Last 3 months", "Last 6 months", "YTD", "Last 12 months", "Last 24 months", "Last 36 months", "Last 5 yrs", "Last 10 yrs", "Max"],
         index=4,
     )
 
@@ -790,9 +818,7 @@ with st.sidebar:
     default_start = today - timedelta(days=365)
     start_custom = st.date_input("Start date", value=default_start)
     end_custom = st.date_input("End date", value=today)
-
-    start_date, end_date = resolve_date_preset(
-        date_preset, start_custom, end_custom)
+    start_date, end_date = resolve_date_preset(date_preset, start_custom, end_custom)
 
     st.header("Chart Settings")
     chart_mode = st.selectbox(
@@ -816,8 +842,7 @@ with st.sidebar:
         step=5,
     )
 
-    show_currency_table = st.checkbox(
-        "Show currency / pence-pound handling", value=False)
+    show_currency_table = st.checkbox("Show currency / pence-pound handling", value=False)
 
     run = st.button("Update chart", type="primary")
 
@@ -833,9 +858,9 @@ portfolio1, portfolio1_error = parse_portfolio_lines(raw_portfolio1)
 if portfolio1_error:
     st.error(f"Portfolio 1 error: {portfolio1_error}")
     st.stop()
+
 p1_name = portfolio1_name.strip() if portfolio1_name.strip() else "Portfolio 1"
-portfolios_data.append(
-    {"name": p1_name, "portfolio": portfolio1, "raw": raw_portfolio1})
+portfolios_data.append({"name": p1_name, "portfolio": portfolio1, "raw": raw_portfolio1})
 
 # Portfolio 2 - optional
 if raw_portfolio2.strip():
@@ -843,14 +868,13 @@ if raw_portfolio2.strip():
     if portfolio2_error:
         st.error(f"Portfolio 2 error: {portfolio2_error}")
         st.stop()
+
     p2_name = portfolio2_name.strip() if portfolio2_name.strip() else "Portfolio 2"
-    portfolios_data.append(
-        {"name": p2_name, "portfolio": portfolio2, "raw": raw_portfolio2})
+    portfolios_data.append({"name": p2_name, "portfolio": portfolio2, "raw": raw_portfolio2})
 else:
     # Portfolio 2 is blank - check if Portfolio 3 is filled
     if raw_portfolio3.strip():
-        st.warning(
-            "⚠️ Please fill portfolios in order. Portfolio 2 is empty but Portfolio 3 has data.")
+        st.warning("⚠️ Please fill portfolios in order. Portfolio 2 is empty but Portfolio 3 has data.")
         st.stop()
 
 # Portfolio 3 - optional
@@ -859,9 +883,9 @@ if raw_portfolio3.strip():
     if portfolio3_error:
         st.error(f"Portfolio 3 error: {portfolio3_error}")
         st.stop()
+
     p3_name = portfolio3_name.strip() if portfolio3_name.strip() else "Portfolio 3"
-    portfolios_data.append(
-        {"name": p3_name, "portfolio": portfolio3, "raw": raw_portfolio3})
+    portfolios_data.append({"name": p3_name, "portfolio": portfolio3, "raw": raw_portfolio3})
 
 # Parse benchmarks
 benchmarks = parse_benchmark_tickers(benchmark_input)
@@ -870,8 +894,9 @@ if not benchmarks:
     st.stop()
 
 # Collect all symbols
-all_portfolio_tickers = []
-portfolio_tickers_map = {}
+all_portfolio_tickers: list[str] = []
+portfolio_tickers_map: dict[str, list[str]] = {}
+
 for p_data in portfolios_data:
     tickers = [t for t, _ in p_data["portfolio"]]
     all_portfolio_tickers.extend(tickers)
@@ -886,12 +911,11 @@ limiting_symbol = None
 if is_max_mode:
     with st.spinner("Calculating maximum common date range..."):
         common_start, limiting_symbol = find_max_common_start_date(all_symbols)
-        if common_start is None:
-            st.error(
-                "Unable to determine maximum date range for the provided symbols.")
-            st.stop()
-        start_date = common_start
-        end_date = today
+    if common_start is None:
+        st.error("Unable to determine maximum date range for the provided symbols.")
+        st.stop()
+    start_date = common_start
+    end_date = today
 
 # Date validation
 if end_date <= start_date:
@@ -908,18 +932,21 @@ if close_raw.empty:
 
 # Currency conversion
 meta_rows = []
-factors = {}
+factors: dict[str, float] = {}
+
 for s in all_symbols:
     meta = get_symbol_meta(s)
     factor, note = currency_factor_to_major_units(meta.get("currency"))
     factors[s] = factor
-    meta_rows.append({
-        "Symbol": s,
-        "Name": meta.get("name") or "",
-        "Yahoo currency": meta.get("currency") or "",
-        "Applied factor": factor,
-        "Note": note,
-    })
+    meta_rows.append(
+        {
+            "Symbol": s,
+            "Name": meta.get("name") or "",
+            "Yahoo currency": meta.get("currency") or "",
+            "Applied factor": factor,
+            "Note": note,
+        }
+    )
 
 meta_df = pd.DataFrame(meta_rows)
 
@@ -932,8 +959,7 @@ for s, f in factors.items():
 if issues:
     st.warning("Some Yahoo download issues occurred:")
     for it in issues:
-        st.write(
-            f"- {it.get('symbol', '?')}: {it.get('problem', 'Unknown issue')}")
+        st.write(f"- {it.get('symbol', '?')}: {it.get('problem', 'Unknown issue')}")
 
 # Backfill and clean
 close_filled, missing_ranges = backfill_leading_flat(close)
@@ -949,11 +975,9 @@ if enable_spike_clean:
 # Verify all needed symbols are available
 for p_data in portfolios_data:
     p_tickers = [t for t, _ in p_data["portfolio"]]
-    missing_portfolio = [
-        t for t in p_tickers if t not in close_filled.columns]
+    missing_portfolio = [t for t in p_tickers if t not in close_filled.columns]
     if missing_portfolio:
-        st.error(
-            f"{p_data['name']} tickers unavailable: {', '.join(missing_portfolio)}")
+        st.error(f"{p_data['name']} tickers unavailable: {', '.join(missing_portfolio)}")
         st.stop()
 
 missing_benchmarks = [b for b in benchmarks if b not in close_filled.columns]
@@ -967,16 +991,20 @@ if show_currency_table:
 
 # Calculate all series
 values_df = pd.DataFrame(index=close_filled.index)
-portfolio_values_dict = {}
-rebalance_dates_map = {}
+portfolio_values_dict: dict[str, pd.Series] = {}
+rebalance_dates_map: dict[str, list[date]] = {}
 
 # Calculate each portfolio
 for p_data in portfolios_data:
     p_name = p_data["name"]
     p_portfolio = p_data["portfolio"]
     p_values, rebal_dates = calculate_portfolio_value(
-        close_filled, p_portfolio, initial_value=1_000_000.0,
-        rebalance_annually=enable_rebalancing)
+        close_filled,
+        p_portfolio,
+        initial_value=1_000_000.0,
+        rebalance_annually=enable_rebalancing,
+    )
+
     if not p_values.empty:
         values_df[p_name] = p_values
         portfolio_values_dict[p_name] = p_values
@@ -985,21 +1013,18 @@ for p_data in portfolios_data:
 
 # Benchmarks
 for bench in benchmarks:
-    bench_values = calculate_benchmark_value(
-        close_filled, bench, initial_value=1_000_000.0)
+    bench_values = calculate_benchmark_value(close_filled, bench, initial_value=1_000_000.0)
     if not bench_values.empty:
         values_df[f"Benchmark: {bench}"] = bench_values
 
 # Cash
-cash_values = calculate_cash_value(
-    close_filled.index, cash_rate, initial_value=1_000_000.0)
+cash_values = calculate_cash_value(close_filled.index, cash_rate, initial_value=1_000_000.0)
 values_df[f"Cash ({cash_rate}%)"] = cash_values
 
 # Apply inflation if selected
 if apply_inflation:
     for col in values_df.columns:
-        values_df[col] = apply_inflation_adjustment(
-            values_df[col], inflation_rate)
+        values_df[col] = apply_inflation_adjustment(values_df[col], inflation_rate)
 
 # Transform for charting
 if chart_mode == "Cumulative return (%)":
@@ -1044,19 +1069,24 @@ metrics_data = []
 # Calculate metrics for all series in values_df (portfolios, benchmarks, and cash)
 for col_name in values_df.columns:
     series_values = values_df[col_name]
+
     cum_ret = calculate_cumulative_return(series_values)
+    ann_ret = calculate_annualized_return(series_values)  # NEW
     sharpe = calculate_sharpe_ratio(series_values, cash_rate)
     sortino = calculate_sortino_ratio(series_values, cash_rate)
     max_dd, max_dd_date = calculate_max_drawdown(series_values)
 
-    metrics_data.append({
-        "Portfolio/Benchmark": col_name,
-        "Cumulative Return": f"{cum_ret * 100:.2f}%",
-        "Sharpe Ratio": f"{sharpe:.2f}",
-        "Sortino Ratio": f"{sortino:.2f}",
-        "Max Drawdown": f"{max_dd * 100:.2f}%",
-        "Max Drawdown Date": fmt_d(max_dd_date) if max_dd_date else "N/A"
-    })
+    metrics_data.append(
+        {
+            "Portfolio/Benchmark": col_name,
+            "Cumulative Return": f"{cum_ret * 100:.2f}%",
+            "Annualized Return": f"{ann_ret * 100:.2f}%",  # NEW (after cumulative, before sharpe)
+            "Sharpe Ratio": f"{sharpe:.2f}",
+            "Sortino Ratio": f"{sortino:.2f}",
+            "Max Drawdown": f"{max_dd * 100:.2f}%",
+            "Max Drawdown Date": fmt_d(max_dd_date) if max_dd_date else "N/A",
+        }
+    )
 
 metrics_df = pd.DataFrame(metrics_data)
 st.dataframe(metrics_df, use_container_width=True, hide_index=True)
