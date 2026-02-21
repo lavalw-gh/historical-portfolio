@@ -34,7 +34,7 @@ def parse_portfolio_lines(raw: str) -> tuple[list[tuple[str, float]], str | None
 
         ticker = parts[0].upper()
 
-        try:=
+        try:
             weight = float(parts[1])
         except ValueError:
             return [], f"Invalid weight for {ticker}: '{parts[1]}' is not a number"
