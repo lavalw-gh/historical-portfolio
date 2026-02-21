@@ -9,11 +9,11 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-# max date added
+# --- v2 change (Extreme Yahoo Data Fixes): GBp/GBP unit-mix extremes ---------
+# # max date added
 # ----------------------------
 # Parsing / settings helpers
 # ----------------------------
-
 
 def parse_portfolio_lines(raw: str) -> tuple[list[tuple[str, float]], str | None]:
     """
@@ -34,7 +34,7 @@ def parse_portfolio_lines(raw: str) -> tuple[list[tuple[str, float]], str | None
 
         ticker = parts[0].upper()
 
-        try:
+        try:=
             weight = float(parts[1])
         except ValueError:
             return [], f"Invalid weight for {ticker}: '{parts[1]}' is not a number"
@@ -138,6 +138,118 @@ def currency_factor_to_major_units(yahoo_currency: str | None) -> tuple[float, s
         return 1.0, f"No conversion applied (Yahoo currency: {yahoo_currency})"
     return 1.0, "Currency unknown (no conversion applied)"
 
+# --- v2 change (Extreme Yahoo Data Fixes): GBp/GBP unit-mix extremes ---------
+def fix_gbp_unit_mix_extremes(
+    prices_gbp: pd.DataFrame,
+    tickers: list[str],
+    currency_map: dict[str, str],
+    factor: float = 100.0,
+    ratio_min: float = 50.0,
+    ratio_max: float = 150.0,
+    tol: float = 0.25,
+    rolling_window: int = 90,
+) -> tuple[pd.DataFrame, list[dict]]:
+    """
+    Fix ~100x-too-low daily prints caused by Yahoo occasionally mixing GBp (pence)
+    and GBP (pounds) values for instruments whose declared currency is GBp/GBX.
+
+    IMPORTANT: Run AFTER the standard divide-by-100 normalisation to pounds
+    (i.e., after applying currency_factor_to_major_units()) because the failure
+    mode is: some days arrive already in GBP and become 100x too small.
+
+    Returns: (fixed_prices_df, report_rows)
+    report_rows items include: Ticker, Date, Currency, Issue, Old Price, New Price, Factor, Method.
+    """
+    fixed = prices_gbp.sort_index().copy()
+    report: list[dict] = []
+
+    for t in tickers:
+        if t not in fixed.columns:
+            continue
+
+        ccy = (currency_map.get(t, "") or "").strip()
+        if ccy not in {"GBp", "GBX"}:
+            continue
+
+        s = fixed[t].astype(float)
+        v = s[(s.notna()) & (s > 0)]
+        if len(v) < 10:
+            continue
+
+        roll_med = s.rolling(
+            window=int(rolling_window),
+            min_periods=max(5, int(rolling_window // 2)),
+        ).median()
+        global_med = float(v.median())
+
+        prev = s.shift(1)
+        nxt = s.shift(-1)
+
+        for dt, cur in s.items():
+            if not (pd.notna(cur) and cur > 0):
+                continue
+
+            # Method A: rolling median (isolated bad days)
+            typ = roll_med.loc[dt]
+            if not (pd.notna(typ) and typ > 0):
+                typ = global_med
+            if typ and typ > 0:
+                ratio = float(typ / cur)
+                if ratio_min <= ratio <= ratio_max and abs(((cur * factor) / typ) - 1.0) <= tol:
+                    old_px, new_px = float(cur), float(cur * factor)
+                    fixed.at[dt, t] = new_px
+                    report.append({
+                        "Ticker": t,
+                        "Date": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                        "Currency": ccy,
+                        "Issue": "GBp/GBP unit-mix extreme (corrected)",
+                        "Old Price": old_px,
+                        "New Price": new_px,
+                        "Factor": factor,
+                        "Method": "RollingMedian",
+                    })
+                    continue
+
+            # Method A2: global median (helps if rolling window gets contaminated)
+            if pd.notna(global_med) and global_med > 0:
+                ratio_g = float(global_med / cur)
+                if ratio_min <= ratio_g <= ratio_max and abs(((cur * factor) / global_med) - 1.0) <= tol:
+                    old_px, new_px = float(cur), float(cur * factor)
+                    fixed.at[dt, t] = new_px
+                    report.append({
+                        "Ticker": t,
+                        "Date": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                        "Currency": ccy,
+                        "Issue": "GBp/GBP unit-mix extreme (corrected)",
+                        "Old Price": old_px,
+                        "New Price": new_px,
+                        "Factor": factor,
+                        "Method": "GlobalMedian",
+                    })
+                    continue
+
+            # Method B: neighbour consistency (single-day flips)
+            p = prev.loc[dt]
+            n = nxt.loc[dt]
+            if pd.notna(p) and pd.notna(n) and (p > 0) and (n > 0):
+                r1, r2 = float(p / cur), float(n / cur)
+                if (ratio_min <= r1 <= ratio_max) and (ratio_min <= r2 <= ratio_max):
+                    if (abs(((cur * factor) / p) - 1.0) <= tol) and (abs(((cur * factor) / n) - 1.0) <= tol):
+                        old_px, new_px = float(cur), float(cur * factor)
+                        fixed.at[dt, t] = new_px
+                        report.append({
+                            "Ticker": t,
+                            "Date": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                            "Currency": ccy,
+                            "Issue": "GBp/GBP unit-mix extreme (corrected)",
+                            "Old Price": old_px,
+                            "New Price": new_px,
+                            "Factor": factor,
+                            "Method": "Neighbors",
+                        })
+
+    return fixed, report
+# --- end v2 change -----------------------------------------------------------
 
 # ----------------------------
 # Yahoo download (Close only)
@@ -627,7 +739,6 @@ def fig_to_png_bytes(fig: plt.Figure) -> bytes:
 # ----------------------------
 # Notes generation
 # ----------------------------
-
 def build_notes_lines(
     start_date: date,
     end_date: date,
@@ -636,6 +747,7 @@ def build_notes_lines(
     spike_threshold_pct: int,
     portfolio_tickers_map: dict[str, list[str]],
     rebalance_dates_map: dict[str, list[date]],
+    gbp_unit_mix_report: list[dict] | None = None,  # --- v2 change
     max_dates_per_symbol: int = 12,
     max_mode_info: tuple[bool, str | None] = (False, None),
 ) -> list[str]:
@@ -720,6 +832,30 @@ def build_notes_lines(
             portfolio_str = f" (affects {', '.join(affected_portfolios)})" if affected_portfolios else ""
 
             lines.append(f"{sym} flattened on: {dates_str}{more}{portfolio_str}.")
+    # --- v2 change: GBp/GBP unit-mix correction notes -----------------------
+    report = gbp_unit_mix_report or []
+    if report:
+        lines.append(
+            f"GBp/GBP unit-mix extremes were detected and corrected for {len(report)} data points (×100 adjustment)."
+        )
+
+        by_sym: dict[str, list[date]] = {}
+        for r in report:
+            sym = r.get("Ticker", "")
+            dt = pd.to_datetime(r.get("Date", ""), errors="coerce")
+            if not sym or dt is pd.NaT:
+                continue
+            by_sym.setdefault(sym, []).append(dt.date())
+
+        for sym in sorted(by_sym.keys()):
+            dts = sorted(set(by_sym[sym]))
+            shown = dts[:max_dates_per_symbol]
+            dates_str = ", ".join(d.strftime("%d/%m/%Y") for d in shown)
+            more = "" if len(dts) <= max_dates_per_symbol else f" (+{len(dts) - max_dates_per_symbol} more)"
+            affected_portfolios = [pname for pname, tickers in portfolio_tickers_map.items() if sym in tickers]
+            portfolio_str = f" (affects {', '.join(affected_portfolios)})" if affected_portfolios else ""
+            lines.append(f"{sym} corrected on: {dates_str}{more}{portfolio_str}.")
+    # --- end v2 change ------------------------------------------------------
 
     return lines
 
@@ -955,6 +1091,21 @@ for s, f in factors.items():
     if s in close.columns and f != 1.0:
         close[s] = close[s] * f
 
+# --- v2 change (Extreme Yahoo Data Fixes): correct GBp/GBP unit-mix extremes ---
+unit_mix_report: list[dict] = []
+currency_map = {row["Symbol"]: row.get("Yahoo currency", "") for _, row in meta_df.iterrows()} if not meta_df.empty else {}
+close, unit_mix_report = fix_gbp_unit_mix_extremes(
+    close,
+    tickers=all_symbols,
+    currency_map=currency_map,
+    factor=100.0,
+    ratio_min=50.0,
+    ratio_max=150.0,
+    tol=0.25,
+    rolling_window=90,
+)
+# --- end v2 change -----------------------------------------------------------
+
 # Show download issues
 if issues:
     st.warning("Some Yahoo download issues occurred:")
@@ -1103,6 +1254,7 @@ notes = build_notes_lines(
     rebalance_dates_map=rebalance_dates_map,
     max_dates_per_symbol=12,
     max_mode_info=(is_max_mode, limiting_symbol),
+    gbp_unit_mix_report=unit_mix_report,  # --- v2 change
 )
 
 for line in notes:
