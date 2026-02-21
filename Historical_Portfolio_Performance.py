@@ -457,6 +457,56 @@ def clean_daily_spikes_flat(close: pd.DataFrame, threshold: float = 0.25) -> tup
     return close, corrections
 
 
+
+
+def validate_and_clean_prices(prices: pd.DataFrame, threshold: float = 0.20) -> tuple[pd.DataFrame, list[dict]]:
+    """Reversal-based spike normalization.
+
+    Flags day T when both legs exceed threshold:
+      - |pct_change(T)|   > threshold  (T-1 -> T)
+      - |pct_change(T+1)| > threshold  (T -> T+1)
+
+    Replaces price(T) with price(T-1) (flat carry) and records a correction.
+
+    Returns (cleaned_prices, corrections) where corrections items match the schema used in notes:
+      {symbol, date, pct_move, old_price, new_price}
+    """
+    cleaned = prices.sort_index().copy()
+    corrections: list[dict] = []
+
+    if cleaned.empty:
+        return cleaned, corrections
+
+    for sym in cleaned.columns:
+        s = cleaned[sym].copy()
+        if s.isna().all():
+            continue
+
+        pct = s.pct_change()        # T-1 -> T
+        pct_next = s.pct_change(-1) # T -> T+1
+        spikes = (pct.abs() > threshold) & (pct_next.abs() > threshold)
+
+        for dt in s[spikes].index:
+            idx = s.index.get_loc(dt)
+            if idx <= 0 or idx >= len(s) - 1:
+                continue
+
+            prev_px = s.iloc[idx - 1]
+            spike_px = s.iloc[idx]
+            if pd.isna(prev_px) or pd.isna(spike_px) or prev_px == 0:
+                continue
+
+            cleaned.loc[dt, sym] = prev_px
+            corrections.append({
+                "symbol": sym,
+                "date": dt,
+                "pct_move": (float(spike_px) / float(prev_px)) - 1.0,
+                "old_price": float(spike_px),
+                "new_price": float(prev_px),
+            })
+
+    return cleaned, corrections
+
 # ----------------------------
 # Portfolio & Benchmark calculations
 # ----------------------------
@@ -809,7 +859,7 @@ def build_notes_lines(
                 )
 
     if not corrections:
-        lines.append(f"No spike flattening was applied (threshold {spike_threshold_pct}% daily move).")
+        lines.append(f"No spike normalization was applied (reversal threshold {spike_threshold_pct}% per leg).")
     else:
         lines.append(
             f"Possible data-quality spikes were flattened when the 1-day move exceeded {spike_threshold_pct}% "
@@ -865,7 +915,7 @@ def build_notes_lines(
 # ----------------------------
 
 st.set_page_config(page_title="Historical Multi Portfolio Performance with rebalancing", layout="wide")
-st.title("Historical Multi Portfolio Performance with rebalancing")
+st.title("Historical Multi Portfolio Performance with rebalancing (v3)")
 
 with st.sidebar:
     st.header("Portfolio Definition")
@@ -967,7 +1017,7 @@ with st.sidebar:
     enable_spike_clean = st.checkbox(
         "Flatten suspicious 1-day spikes",
         value=True,
-        help="If abs(1-day move) exceeds the threshold, replace that day's price with the prior day's price.",
+        help="Reversal-based: flag a spike day when the move exceeds the threshold and the following day reverses by more than the threshold; the spike day is replaced with the prior day's price.",
     )
 
     spike_threshold_pct = st.slider(
@@ -1118,11 +1168,10 @@ close_filled = close_filled.dropna(axis=1, how="all")
 
 corrections: list[dict] = []
 if enable_spike_clean:
-    close_filled, corrections = clean_daily_spikes_flat(
+    close_filled, corrections = validate_and_clean_prices(
         close_filled,
         threshold=float(spike_threshold_pct) / 100.0,
     )
-
 # Verify all needed symbols are available
 for p_data in portfolios_data:
     p_tickers = [t for t, _ in p_data["portfolio"]]
