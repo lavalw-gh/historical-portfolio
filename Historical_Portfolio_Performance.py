@@ -33,11 +33,16 @@ def parse_portfolio_lines(raw: str) -> tuple[list[tuple[str, float]], str | None
             return [], f"Invalid format: '{ln}'. Expected: TICKER, WEIGHT"
 
         ticker = parts[0].upper()
+        if not ticker:
+            return [], "Ticker must not be empty"
 
         try:
             weight = float(parts[1])
         except ValueError:
             return [], f"Invalid weight for {ticker}: '{parts[1]}' is not a number"
+
+        if not np.isfinite(weight):
+            return [], f"Weight for {ticker} must be a finite number (got {parts[1]})"
 
         if weight < 0:
             return [], f"Weight for {ticker} must be non-negative (got {weight})"
@@ -64,6 +69,20 @@ def parse_benchmark_tickers(raw: str) -> list[str]:
         return []
     tickers = [t.strip().upper() for t in raw.split(",")]
     return [t for t in tickers if t]
+
+
+def validate_series_names(portfolio_names: list[str], benchmarks: list[str], cash_rate: float) -> str | None:
+    """Prevent display names from overwriting portfolio, benchmark, or cash data."""
+    seen = set()
+    reserved = {f"Benchmark: {ticker}" for ticker in benchmarks}
+    reserved.add(f"Cash ({cash_rate}%)")
+    for name in portfolio_names:
+        if name in seen:
+            return f"Duplicate portfolio name: '{name}'. Please give each portfolio a unique name."
+        if name in reserved:
+            return f"Portfolio name '{name}' conflicts with a benchmark or cash series. Please choose another name."
+        seen.add(name)
+    return None
 
 
 def resolve_date_preset(preset: str, start_custom: date, end_custom: date) -> tuple[date, date]:
@@ -256,7 +275,7 @@ def fix_gbp_unit_mix_extremes(
 # ----------------------------
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_yahoo_close(symbols: list[str], start: date, end: date) -> tuple[pd.DataFrame, list[dict]]:
+def _fetch_yahoo_close_cached(symbols: list[str], start: date, end: date) -> tuple[pd.DataFrame, list[dict]]:
     """Download auto-adjusted Close series for symbols."""
     if not symbols:
         return pd.DataFrame(), [{"symbol": "", "problem": "No symbols provided"}]
@@ -276,12 +295,12 @@ def fetch_yahoo_close(symbols: list[str], start: date, end: date) -> tuple[pd.Da
 
     if data is None or getattr(data, "empty", True):
         issues.append({"symbol": ",".join(symbols), "problem": "No data returned for any symbol"})
-        return pd.DataFrame(), issues
+        raise ValueError(issues[-1]["problem"])
 
     if isinstance(data.columns, pd.MultiIndex):
         if "Close" not in data.columns.get_level_values(0):
             issues.append({"symbol": ",".join(symbols), "problem": "Expected Close in yfinance output but not found"})
-            return pd.DataFrame(), issues
+            raise ValueError(issues[-1]["problem"])
         close = data["Close"].copy()
     else:
         if "Close" in data.columns:
@@ -292,7 +311,7 @@ def fetch_yahoo_close(symbols: list[str], start: date, end: date) -> tuple[pd.Da
             close.columns = [symbols[0]]
         else:
             issues.append({"symbol": symbols[0], "problem": "Neither Close nor Adj Close found in yfinance output"})
-            return pd.DataFrame(), issues
+            raise ValueError(issues[-1]["problem"])
 
     for s in symbols:
         if s not in close.columns:
@@ -304,70 +323,40 @@ def fetch_yahoo_close(symbols: list[str], start: date, end: date) -> tuple[pd.Da
     return close, issues
 
 
+def fetch_yahoo_close(symbols: list[str], start: date, end: date) -> tuple[pd.DataFrame, list[dict]]:
+    """Report download failures without caching transient failures as data."""
+    try:
+        return _fetch_yahoo_close_cached(symbols, start, end)
+    except Exception as exc:
+        return pd.DataFrame(), [{"symbol": ",".join(symbols), "problem": f"Yahoo download failed: {type(exc).__name__}: {exc}"}]
+
+
 # ----------------------------
 # Max date range determination
 # ----------------------------
 
-def find_max_common_start_date(symbols: list[str]) -> tuple[date | None, str | None]:
-    """
-    Fetch maximum available history for all symbols and find the latest
-    first-valid-date (so all symbols have data from that point forward).
-    Returns (start_date, limiting_symbol)
+def find_max_common_start_date(
+    symbols: list[str], close: pd.DataFrame | None = None,
+) -> tuple[date | None, str | None]:
+    """Find the latest first-valid date within the history searched since 1990.
+
+    The app supplies downloaded history so Max mode does not download twice.
+    The optional argument preserves use by callers supplying only symbols.
     """
     if not symbols:
         return None, None
-
-    # Fetch from a very early date to get all available history
-    early_start = date(1990, 1, 1)
-    today = date.today()
-    end_plus = today + timedelta(days=1)
-
-    try:
-        data = yf.download(
-            symbols,
-            start=early_start,
-            end=end_plus,
-            auto_adjust=True,
-            progress=False,
-            group_by="column",
-        )
-
-        if data is None or getattr(data, "empty", True):
-            return None, None
-
-        # Extract Close prices
-        if isinstance(data.columns, pd.MultiIndex):
-            if "Close" not in data.columns.get_level_values(0):
-                return None, None
-            close = data["Close"].copy()
-        else:
-            if "Close" in data.columns:
-                close = data["Close"].to_frame()
-                close.columns = [symbols[0]]
-            elif "Adj Close" in data.columns:
-                close = data["Adj Close"].to_frame()
-                close.columns = [symbols[0]]
-            else:
-                return None, None
-
-        # Find first valid date for each symbol
-        first_dates: dict[str, date] = {}
-        for sym in symbols:
-            if sym in close.columns:
-                first_valid = close[sym].first_valid_index()
-                if first_valid is not None:
-                    first_dates[sym] = pd.to_datetime(first_valid).date()
-
-        if not first_dates:
-            return None, None
-
-        # The max (latest) first date is our common start
-        limiting_symbol = max(first_dates, key=first_dates.get)
-        common_start = first_dates[limiting_symbol]
-        return common_start, limiting_symbol
-
-    except Exception:
+    if close is None:
+        close, _ = fetch_yahoo_close(symbols, date(1990, 1, 1), date.today())
+    first_dates: dict[str, date] = {}
+    for sym in symbols:
+        if sym in close.columns:
+            first_valid = close[sym].first_valid_index()
+            if first_valid is not None:
+                first_dates[sym] = pd.to_datetime(first_valid).date()
+    if not first_dates:
         return None, None
+    limiting_symbol = max(first_dates, key=first_dates.get)
+    return first_dates[limiting_symbol], limiting_symbol
 
 
 # ----------------------------
@@ -395,6 +384,25 @@ def backfill_leading_flat(close: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]
             continue
 
         first_valid = ser.first_valid_index()
+        # Report subsequent missing runs before the existing forward fill.
+        later = ser.loc[first_valid:]
+        run_start = None
+        previous_valid = first_valid
+        gap_last = None
+        for dt, value in later.items():
+            if pd.isna(value):
+                if run_start is None:
+                    run_start = dt
+                gap_last = dt
+            else:
+                if run_start is not None:
+                    missing_ranges.append({"symbol": s, "type": "internalnan",
+                        "start": run_start, "end": gap_last, "used_price_from": previous_valid})
+                    run_start = None
+                previous_valid = dt
+        if run_start is not None:
+            missing_ranges.append({"symbol": s, "type": "trailingnan",
+                "start": run_start, "end": gap_last, "used_price_from": previous_valid})
         if first_valid is not None and first_valid > first_idx:
             missing_ranges.append(
                 {
@@ -417,7 +425,7 @@ def backfill_leading_flat(close: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]
 # ----------------------------
 
 def clean_daily_spikes_flat(close: pd.DataFrame, threshold: float = 0.25) -> tuple[pd.DataFrame, list[dict]]:
-    """Replace spikes exceeding threshold with previous day's price."""
+    """Legacy cleaner, unused by this app; retained for possible external callers."""
     close = close.sort_index().copy()
     corrections: list[dict] = []
 
@@ -562,7 +570,10 @@ def calculate_portfolio_value(
 
     # Track when to rebalance (anniversary dates)
     next_rebalance_year = start_date.year + 1
-    next_rebalance_date = pd.Timestamp(date(next_rebalance_year, start_date.month, start_date.day))
+    try:
+        next_rebalance_date = pd.Timestamp(date(next_rebalance_year, start_date.month, start_date.day))
+    except ValueError:
+        next_rebalance_date = pd.Timestamp(date(next_rebalance_year, start_date.month, 28))
 
     for i, current_date in enumerate(close.index):
         # Calculate current portfolio value
@@ -689,7 +700,11 @@ def calculate_sharpe_ratio(values: pd.Series, risk_free_rate: float) -> float:
 
 
 def calculate_sortino_ratio(values: pd.Series, risk_free_rate: float) -> float:
-    """Calculate annualized Sortino ratio."""
+    """Calculate annualized Sortino using cash-target downside deviation.
+
+    Average squared shortfalls across all returns, including zero shortfalls.
+    Retain the existing zero fallback when no downside deviation is available.
+    """
     if values.empty or len(values) < 2:
         return 0.0
 
@@ -698,12 +713,13 @@ def calculate_sortino_ratio(values: pd.Series, risk_free_rate: float) -> float:
         return 0.0
 
     excess_returns = returns - (risk_free_rate / 100.0 / 252)
-    downside_returns = returns[returns < 0]
+    shortfalls = excess_returns.clip(upper=0.0)
+    downside_deviation = np.sqrt((shortfalls ** 2).mean())
 
-    if downside_returns.empty or downside_returns.std() == 0:
+    if not np.isfinite(downside_deviation) or downside_deviation == 0:
         return 0.0
 
-    sortino = excess_returns.mean() / downside_returns.std() * np.sqrt(252)
+    sortino = excess_returns.mean() / downside_deviation * np.sqrt(252)
     return sortino
 
 
@@ -808,7 +824,7 @@ def build_notes_lines(
     is_max_mode, limiting_symbol = max_mode_info
     if is_max_mode and limiting_symbol:
         lines.append(
-            f"Max date range used: {fmt_d(start_date)} to {fmt_d(end_date)}, which is the maximum range available for {limiting_symbol}."
+            f"Max date range used: {fmt_d(start_date)} to {fmt_d(end_date)}, limited by {limiting_symbol} within Yahoo history searched since 1990."
         )
 
     # Rebalancing information
@@ -857,6 +873,19 @@ def build_notes_lines(
                 lines.append(
                     f"{s} has no usable Yahoo price history between {fmt_d(start)} and {fmt_d(end)}{portfolio_str}."
                 )
+
+    for m in missing_ranges:
+        if m.get("type") not in {"internalnan", "trailingnan"}:
+            continue
+        symbol = m["symbol"]
+        affected = [name for name, tickers in portfolio_tickers_map.items() if symbol in tickers]
+        suffix = f" (affects {', '.join(affected)})" if affected else ""
+        gap_type = "Trailing" if m["type"] == "trailingnan" else "Internal"
+        lines.append(
+            f"{symbol}: {gap_type} missing prices from {fmt_d(pd.to_datetime(m['start']).date())} "
+            f"to {fmt_d(pd.to_datetime(m['end']).date())}; forward-filled using the price from "
+            f"{fmt_d(pd.to_datetime(m['used_price_from']).date())} (assumed zero growth){suffix}."
+        )
 
     if not corrections:
         lines.append(f"No spike normalization was applied (reversal threshold {spike_threshold_pct}% per leg).")
@@ -1046,7 +1075,7 @@ if portfolio1_error:
     st.stop()
 
 p1_name = portfolio1_name.strip() if portfolio1_name.strip() else "Portfolio 1"
-portfolios_data.append({"name": p1_name, "portfolio": portfolio1, "raw": raw_portfolio1})
+portfolios_data.append({"name": p1_name, "portfolio": portfolio1})
 
 # Portfolio 2 - optional
 if raw_portfolio2.strip():
@@ -1056,7 +1085,7 @@ if raw_portfolio2.strip():
         st.stop()
 
     p2_name = portfolio2_name.strip() if portfolio2_name.strip() else "Portfolio 2"
-    portfolios_data.append({"name": p2_name, "portfolio": portfolio2, "raw": raw_portfolio2})
+    portfolios_data.append({"name": p2_name, "portfolio": portfolio2})
 else:
     # Portfolio 2 is blank - check if Portfolio 3 is filled
     if raw_portfolio3.strip():
@@ -1071,12 +1100,17 @@ if raw_portfolio3.strip():
         st.stop()
 
     p3_name = portfolio3_name.strip() if portfolio3_name.strip() else "Portfolio 3"
-    portfolios_data.append({"name": p3_name, "portfolio": portfolio3, "raw": raw_portfolio3})
+    portfolios_data.append({"name": p3_name, "portfolio": portfolio3})
 
 # Parse benchmarks
 benchmarks = parse_benchmark_tickers(benchmark_input)
 if not benchmarks:
     st.error("Please enter at least one benchmark ticker.")
+    st.stop()
+
+name_error = validate_series_names([p["name"] for p in portfolios_data], benchmarks, cash_rate)
+if name_error:
+    st.error(name_error)
     st.stop()
 
 # Collect all symbols
@@ -1096,9 +1130,12 @@ limiting_symbol = None
 
 if is_max_mode:
     with st.spinner("Calculating maximum common date range..."):
-        common_start, limiting_symbol = find_max_common_start_date(all_symbols)
+        max_history, issues = fetch_yahoo_close(all_symbols, date(1990, 1, 1), today)
+        common_start, limiting_symbol = find_max_common_start_date(all_symbols, max_history)
     if common_start is None:
         st.error("Unable to determine maximum date range for the provided symbols.")
+        for issue in issues:
+            st.write(f"- {issue['symbol']}: {issue['problem']}")
         st.stop()
     start_date = common_start
     end_date = today
@@ -1109,11 +1146,16 @@ if end_date <= start_date:
     st.stop()
 
 # Download prices
-with st.spinner("Downloading prices from Yahoo..."):
-    close_raw, issues = fetch_yahoo_close(all_symbols, start_date, end_date)
+if is_max_mode:
+    close_raw = max_history.loc[str(start_date):str(end_date)].copy()
+else:
+    with st.spinner("Downloading prices from Yahoo..."):
+        close_raw, issues = fetch_yahoo_close(all_symbols, start_date, end_date)
 
 if close_raw.empty:
     st.error("No price data returned.")
+    for issue in issues:
+        st.write(f"- {issue['symbol']}: {issue['problem']}")
     st.stop()
 
 # Currency conversion
@@ -1191,7 +1233,6 @@ if show_currency_table:
 
 # Calculate all series
 values_df = pd.DataFrame(index=close_filled.index)
-portfolio_values_dict: dict[str, pd.Series] = {}
 rebalance_dates_map: dict[str, list[date]] = {}
 
 # Calculate each portfolio
@@ -1207,7 +1248,6 @@ for p_data in portfolios_data:
 
     if not p_values.empty:
         values_df[p_name] = p_values
-        portfolio_values_dict[p_name] = p_values
         if rebal_dates:
             rebalance_dates_map[p_name] = rebal_dates
 
@@ -1222,9 +1262,16 @@ cash_values = calculate_cash_value(close_filled.index, cash_rate, initial_value=
 values_df[f"Cash ({cash_rate}%)"] = cash_values
 
 # Apply inflation if selected
+metrics_risk_free_rate = cash_rate
 if apply_inflation:
-    for col in values_df.columns:
-        values_df[col] = apply_inflation_adjustment(values_df[col], inflation_rate)
+    # Reuse one factor, preserving the existing daily compounding convention.
+    days_from_start = (values_df.index - values_df.index[0]).days
+    inflation_factor = (1 + inflation_rate / 100.0 / 365.0) ** days_from_start
+    values_df = values_df.div(inflation_factor, axis=0)
+    # Annual nominal-equivalent real rate under the same daily convention.
+    metrics_risk_free_rate = 365.0 * (
+        (1 + cash_rate / 100.0 / 365.0) / (1 + inflation_rate / 100.0 / 365.0) - 1
+    ) * 100.0
 
 # Transform for charting
 if chart_mode == "Cumulative return (%)":
@@ -1272,8 +1319,8 @@ for col_name in values_df.columns:
 
     cum_ret = calculate_cumulative_return(series_values)
     ann_ret = calculate_annualized_return(series_values)  # NEW
-    sharpe = calculate_sharpe_ratio(series_values, cash_rate)
-    sortino = calculate_sortino_ratio(series_values, cash_rate)
+    sharpe = calculate_sharpe_ratio(series_values, metrics_risk_free_rate)
+    sortino = calculate_sortino_ratio(series_values, metrics_risk_free_rate)
     max_dd, max_dd_date = calculate_max_drawdown(series_values)
 
     metrics_data.append(
@@ -1305,6 +1352,9 @@ notes = build_notes_lines(
     max_mode_info=(is_max_mode, limiting_symbol),
     gbp_unit_mix_report=unit_mix_report,  # --- v2 change
 )
+
+if apply_inflation:
+    notes.append(f"Sharpe/Sortino use an inflation-adjusted risk-free rate of {metrics_risk_free_rate:.2f}% (252-observation annualisation retained).")
 
 for line in notes:
     st.write(f"- {line}")
